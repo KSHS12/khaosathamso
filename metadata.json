@@ -1,0 +1,8 @@
+{
+  "name": "Remix Khảo Sát Hàm Số — Toán THPT",
+  "description": "Ứng dụng khảo sát sự biến thiên và vẽ đồ thị hàm số chuẩn SGK Toán 12 Kết nối tri thức với bộ giải ký hiệu chính xác, bảng biến thiên và đồ thị tương tác.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

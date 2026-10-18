@@ -1,331 +1,196 @@
-import { useEffect, useRef, useState } from "react";
-// @ts-ignore - no types shipped
-import functionPlot from "function-plot";
-
-const SAMPLES = [
-  "x^3 - 3*x + 1",
-  "(x - 2) / (x - 1)",
-  "(x^2 - 2*x + 1) / (x - 2)",
-];
-
-function toJs(expr: string): string {
-  // function-plot accepts ^, but our evaluator needs ** for JS
-  return expr
-    .replace(/\^/g, "**")
-    .replace(/\bsin\b/g, "Math.sin")
-    .replace(/\bcos\b/g, "Math.cos")
-    .replace(/\btan\b/g, "Math.tan")
-    .replace(/\bexp\b/g, "Math.exp")
-    .replace(/\blog\b/g, "Math.log")
-    .replace(/\bsqrt\b/g, "Math.sqrt")
-    .replace(/\babs\b/g, "Math.abs");
-}
-
-function tryEval(expr: string, x: number): number | null {
-  try {
-    const js = toJs(expr);
-    // eslint-disable-next-line no-new-func
-    const fn = new Function("x", `"use strict"; return (${js});`);
-    const v = fn(x);
-    if (typeof v !== "number" || !isFinite(v)) return null;
-    return v;
-  } catch {
-    return null;
-  }
-}
-
-interface RootInfo {
-  approx: number;
-  fValue: number;
-}
-
-// Bisection within [a,b], requires sign change
-function bisect(expr: string, a: number, b: number, iters = 200): RootInfo | null {
-  let fa = tryEval(expr, a);
-  let fb = tryEval(expr, b);
-  if (fa === null || fb === null || fa * fb > 0) return null;
-  let lo = a;
-  let hi = b;
-  for (let i = 0; i < iters; i++) {
-    const mid = (lo + hi) / 2;
-    const fm = tryEval(expr, mid);
-    if (fm === null) return null;
-    if (Math.abs(fm) < 1e-12) return { approx: mid, fValue: fm };
-    if (fa! * fm < 0) {
-      hi = mid;
-      fb = fm;
-    } else {
-      lo = mid;
-      fa = fm;
-    }
-  }
-  const mid = (lo + hi) / 2;
-  return { approx: mid, fValue: tryEval(expr, mid) ?? NaN };
-}
-
-function findRoots(expr: string, lo: number, hi: number, step = 0.02): RootInfo[] {
-  const roots: RootInfo[] = [];
-  // sign-change roots (bisection)
-  let prevX = lo;
-  let prevY = tryEval(expr, lo);
-  for (let x = lo + step; x <= hi; x += step) {
-    const y = tryEval(expr, x);
-    if (prevY !== null && y !== null && prevY * y < 0) {
-      const r = bisect(expr, prevX, x);
-      if (r && !roots.some((e) => Math.abs(e.approx - r.approx) < 1e-4)) {
-        roots.push(r);
-      }
-    }
-    prevX = x;
-    prevY = y;
-  }
-  // touch roots: local min of |f| near zero without sign change (double/even roots)
-  for (let x = lo; x <= hi; x += step) {
-    const y = tryEval(expr, x);
-    if (y === null) continue;
-    if (Math.abs(y) < 1e-6) {
-      if (!roots.some((e) => Math.abs(e.approx - x) < 1e-3)) {
-        roots.push({ approx: x, fValue: y });
-      }
-    }
-  }
-  return roots;
-}
-
-function findPoles(expr: string, lo: number, hi: number, step = 0.02): number[] {
-  const poles: number[] = [];
-  let prevX = lo;
-  let prevY = tryEval(expr, lo);
-  for (let x = lo + step; x <= hi; x += step) {
-    const y = tryEval(expr, x);
-    if (prevY !== null && y !== null) {
-      // detect sign flip across a near-infinite jump: large magnitude product and opposite sign
-      if (prevY * y < 0 && (Math.abs(prevY) > 1e3 || Math.abs(y) > 1e3)) {
-        const pole = prevX + (x - prevX) * (Math.abs(prevY) / (Math.abs(prevY) + Math.abs(y)));
-        if (!poles.some((p) => Math.abs(p - pole) < 1e-3)) poles.push(pole);
-      }
-    }
-    prevX = x;
-    prevY = y;
-  }
-  return poles;
-}
-
-function findExtrema(
-  expr: string,
-  lo: number,
-  hi: number,
-  step = 0.02
-): { x: number; y: number; kind: "max" | "min" }[] {
-  const out: { x: number; y: number; kind: "max" | "min" }[] = [];
-  // skip windows near known poles to avoid spurious extrema from the asymptote jump
-  const poles = findPoles(expr, lo, hi);
-  const nearPole = (x: number) => poles.some((p) => Math.abs(p - x) < 0.1);
-  let pX = lo;
-  let pY = tryEval(expr, lo);
-  let cX = lo + step;
-  let cY = tryEval(expr, cX);
-  for (let x = lo + 2 * step; x <= hi; x += step) {
-    const nY = tryEval(expr, x);
-    if (pY !== null && cY !== null && nY !== null) {
-      if (!nearPole(cX) && Math.abs(cY) < 1e4) {
-        if (cY > pY && cY > nY) {
-          if (!out.some((e) => Math.abs(e.x - cX) < 1e-3))
-            out.push({ x: cX, y: cY, kind: "max" });
-        } else if (cY < pY && cY < nY) {
-          if (!out.some((e) => Math.abs(e.x - cX) < 1e-3))
-            out.push({ x: cX, y: cY, kind: "min" });
-        }
-      }
-    }
-    pX = cX;
-    pY = cY;
-    cX = x;
-    cY = nY;
-  }
-  return out;
-}
-
-function fmt(n: number): string {
-  if (!isFinite(n)) return n > 0 ? "+∞" : n < 0 ? "-∞" : "NaN";
-  if (Math.abs(n) < 1e-10) return "0";
-  return Number(n.toFixed(6)).toString();
-}
-
-interface Analysis {
-  expr: string;
-  roots: RootInfo[];
-  poles: number[];
-  extrema: { x: number; y: number; kind: "max" | "min" }[];
-  values: { x: number; y: number | null }[];
-}
-
-function analyze(expr: string, lo: number, hi: number): Analysis {
-  return {
-    expr,
-    roots: findRoots(expr, lo, hi),
-    poles: findPoles(expr, lo, hi),
-    extrema: findExtrema(expr, lo, hi),
-    values: [-2, -1, 0, 1, 2, 3].map((x) => ({ x, y: tryEval(expr, x) })),
-  };
-}
+import React, { useState, useEffect, useCallback } from 'react';
+import { Header } from './components/Header';
+import { FunctionInput } from './components/FunctionInput';
+import { ReportView } from './components/ReportView';
+import { TheoryModal } from './components/TheoryModal';
+import { Watermark } from './components/Watermark';
+import { investigateFunction } from './math/investigator';
+import { InvestigationResult } from './math/types';
+import { AlertTriangle } from 'lucide-react';
 
 export default function App() {
-  const [expr, setExpr] = useState(SAMPLES[0]);
-  const [xMin, setXMin] = useState(-4);
-  const [xMax, setXMax] = useState(4);
-  const [error, setError] = useState<string | null>(null);
-  const plotRef = useRef<HTMLDivElement>(null);
+  const [currentExpr, setCurrentExpr] = useState('x^3 - 3*x + 1');
+  const [result, setResult] = useState<InvestigationResult | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isTheoryOpen, setIsTheoryOpen] = useState(false);
 
-  const draw = () => {
-    if (!plotRef.current) return;
-    setError(null);
-    try {
-      functionPlot({
-        target: "#plot",
-        width: plotRef.current.clientWidth,
-        height: 420,
-        xAxis: { domain: [xMin, xMax] },
-        yAxis: { domain: [-10, 10] },
-        grid: true,
-        data: [
-          {
-            fn: expr,
-            color: "#2563eb",
-          },
-        ],
-      });
-    } catch (e: any) {
-      setError(e?.message ?? "Không thể vẽ hàm số này");
+  const runInvestigation = useCallback(
+    (expr: string, interval?: { min: number; max: number }) => {
+      setIsLoading(true);
+      setErrorMsg(null);
+
+      try {
+        const res = investigateFunction(expr, interval);
+        setResult(res);
+        setCurrentExpr(expr);
+      } catch (err: unknown) {
+        console.error('Lỗi khảo sát:', err);
+        const msg = err instanceof Error ? err.message : 'Đã xảy ra lỗi khi phân tích hàm số';
+        setErrorMsg(msg);
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    []
+  );
+
+  // Initial load
+  useEffect(() => {
+    runInvestigation('x^3 - 3*x + 1');
+  }, [runInvestigation]);
+
+  const handleNewSurvey = () => {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    const inputEl = document.getElementById('function-input') as HTMLInputElement | null;
+    if (inputEl) {
+      inputEl.focus();
+      inputEl.select();
     }
   };
 
-  useEffect(() => {
-    draw();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expr, xMin, xMax]);
-
-  // resize handling
-  useEffect(() => {
-    const onResize = () => draw();
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expr, xMin, xMax]);
-
-  const analyses: Analysis[] = SAMPLES.map((s) => analyze(s, xMin, xMax));
-
   return (
-    <div className="app">
-      <header className="app__header">
-        <h1>Function Plotter</h1>
-        <p>Nhập hàm số theo biến x. Dùng ^ cho lũy thừa, *, /, +, − như bình thường.</p>
-      </header>
+    <div className="min-h-screen flex flex-col bg-slate-950 text-slate-100 font-sans selection:bg-emerald-600 selection:text-white relative">
+      {/* Floating Centered Watermark that travels to all positions */}
+      <Watermark />
 
-      <div className="layout">
-        <aside className="sidebar">
-          <div className="field">
-            <label>Hàm số f(x)</label>
-            <input value={expr} onChange={(e) => setExpr(e.target.value)} />
-            {error && <div className="error">{error}</div>}
+      {/* 3-Zone Header Contract */}
+      <Header
+        onNewSurvey={handleNewSurvey}
+        onOpenTheoryModal={() => setIsTheoryOpen(true)}
+        onOpenGuideModal={() => setIsTheoryOpen(true)}
+      />
+
+      {/* Main Content Area */}
+      <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 py-6 md:py-8 space-y-6">
+        {/* Title & Introduction */}
+        <div className="space-y-2 text-center sm:text-left print:hidden">
+          <div className="flex items-center justify-center sm:justify-start gap-2 text-xs font-bold text-slate-400">
+            <span className="text-emerald-400 font-black">Chương trình GDPT 2018</span>
+            <span aria-hidden="true">·</span>
+            <span>Toán 12 Kết nối tri thức</span>
+            <span aria-hidden="true">·</span>
+            <span className="text-emerald-300 font-extrabold">Bộ giải ký hiệu chính xác</span>
+          </div>
+          <h1 className="text-2xl sm:text-4xl font-black text-white tracking-tight">
+            Khảo sát sự biến thiên & vẽ đồ thị hàm số
+          </h1>
+          <p className="text-sm text-slate-300 max-w-3xl leading-relaxed">
+            Hệ thống giải tích chuẩn mực: tính đạo hàm bậc 1, đạo hàm bậc 2, giới hạn và tiệm cận, bảng biến thiên và kết luận chiều biến thiên, cực trị theo đúng quy tắc SGK Toán 12.
+          </p>
+        </div>
+
+        {/* Function Input Box */}
+        <section className="print:hidden">
+          <FunctionInput onInvestigate={runInvestigation} isLoading={isLoading} />
+        </section>
+
+        {/* Error Callout if any */}
+        {errorMsg && (
+          <div className="p-4 bg-rose-950/60 border border-rose-500/50 rounded-2xl text-rose-200 flex items-start gap-3 shadow-lg">
+            <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-bold text-rose-300 text-base">Không thể khảo sát biểu thức này</div>
+              <div className="text-sm mt-0.5 text-rose-200">{errorMsg}</div>
+              <div className="text-xs text-rose-300/80 mt-2">
+                Gợi ý: Kiểm tra lại ngoặc đơn <code className="bg-slate-900 px-1.5 py-0.5 rounded border border-rose-400 font-mono text-white">(...)</code>, dấu lũy thừa <code className="bg-slate-900 px-1.5 py-0.5 rounded border border-rose-400 font-mono text-white">^</code>, hoặc bấm chọn một ví dụ mẫu ở trên.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Investigation Report Solution */}
+        {result && (
+          <section id="loi-giai-chi-tiet">
+            <ReportView result={result} />
+          </section>
+        )}
+
+        {/* Educational Reference Cards */}
+        <section id="cac-dang-ham" className="pt-6 border-t border-slate-800 space-y-4 print:hidden">
+          <div className="flex items-center justify-between">
+            <h3 className="text-lg font-black text-white">
+              Phạm vi các dạng hàm số <span className="text-emerald-400 font-black">Toán 12 THPT</span>
+            </h3>
+            <span className="text-xs text-emerald-400 font-extrabold bg-emerald-950/60 px-2.5 py-1 rounded-lg border border-emerald-500/30">
+              Chuẩn GDPT 2018
+            </span>
           </div>
 
-          <div className="row">
-            <div className="field">
-              <label>x min</label>
-              <input
-                type="number"
-                value={xMin}
-                onChange={(e) => setXMin(Number(e.target.value))}
-              />
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="p-5 bg-slate-900/90 border border-slate-800 rounded-2xl shadow-xl space-y-2">
+              <div className="font-extrabold text-emerald-400 text-base">Hàm đa thức</div>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                Bậc 1, bậc 2, bậc 3 (có điểm uốn làm tâm đối xứng) và bậc 4 trùng phương (nhận trục tung làm trục đối xứng).
+              </p>
+              <div className="text-xs font-mono font-bold text-emerald-300 bg-slate-950 p-2.5 rounded-xl border border-slate-800">
+                x^3 - 3*x + 1, x^4 - 2*x^2 + 1
+              </div>
             </div>
-            <div className="field">
-              <label>x max</label>
-              <input
-                type="number"
-                value={xMax}
-                onChange={(e) => setXMax(Number(e.target.value))}
-              />
+
+            <div className="p-5 bg-slate-900/90 border border-slate-800 rounded-2xl shadow-xl space-y-2">
+              <div className="font-extrabold text-emerald-400 text-base">Hàm phân thức hữu tỉ</div>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                Nhất biến (ax+b)/(cx+d) và bậc hai trên bậc một (ax²+bx+c)/(dx+e) có tiệm cận xiên. Tự động nhận diện điểm khuyết (hỗng).
+              </p>
+              <div className="text-xs font-mono font-bold text-emerald-300 bg-slate-950 p-2.5 rounded-xl border border-slate-800">
+                (x-2)/(x-1), (x^2-2*x+1)/(x-2)
+              </div>
+            </div>
+
+            <div className="p-5 bg-slate-900/90 border border-slate-800 rounded-2xl shadow-xl space-y-2">
+              <div className="font-extrabold text-emerald-400 text-base">Hàm số mũ & Lôgarit</div>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                Hàm số mũ A·a^(kx+h)+B và hàm số lôgarit A·log_a(kx+h)+B (hỗ trợ ln). Tự động tìm tập xác định và tiệm cận tương ứng.
+              </p>
+              <div className="text-xs font-mono font-bold text-emerald-300 bg-slate-950 p-2.5 rounded-xl border border-slate-800">
+                2^(x+1)-3, ln(x-1), log(x+2, 3)
+              </div>
             </div>
           </div>
+        </section>
 
-          <div className="row">
-            <button className="btn" onClick={draw}>Vẽ lại</button>
+        {/* Guideline section for Pedagogical reference */}
+        <section id="huong-dan-dung" className="p-5 bg-slate-900/70 border border-slate-800 rounded-2xl text-xs text-slate-300 space-y-2.5 print:hidden">
+          <div className="font-extrabold text-emerald-400 text-sm">Lưu ý sư phạm & toán học:</div>
+          <p>
+            • Khi giải phương trình đạo hàm hoặc tìm giao điểm trục hoành, các nghiệm hữu tỉ được hiển thị dưới dạng phân số tối giản chính xác. Trong trường hợp nghiệm vô tỉ, ứng dụng hiển thị giá trị căn thức hoặc số thực có ghi chú <span className="text-amber-400 font-bold">“xấp xỉ”</span>.
+          </p>
+          <p>
+            • Đồ thị được chia thành các nhánh tách biệt qua các đường tiệm cận đứng hoặc điểm khuyết, tuyệt đối không nối đoạn thẳng xuyên qua điểm gián đoạn.
+          </p>
+          <p>
+            • Bạn có thể dùng nút <span className="text-emerald-400 font-bold">“In lời giải”</span> hoặc <span className="text-emerald-400 font-bold">“Tải lời giải”</span> để xuất đề tài liệu khảo sát hoàn chỉnh cho học sinh hoặc đính kèm vào giáo án.
+          </p>
+        </section>
+      </main>
+
+      {/* Footer */}
+      <footer className="border-t border-slate-800 bg-slate-950 py-6 mt-12 print:hidden">
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-400">
+          <div>
+            Khảo Sát Hàm Số - Thầy Hữu — Ứng dụng hỗ trợ giảng dạy và học tập môn Toán THPT theo chương trình SGK 2018.
+          </div>
+          <div className="flex items-center gap-4">
             <button
-              className="btn btn--ghost"
-              onClick={() => {
-                setExpr("");
-                setError(null);
-              }}
+              onClick={() => setIsTheoryOpen(true)}
+              className="hover:text-emerald-400 transition-colors cursor-pointer font-bold"
             >
-              Xóa
+              Lý thuyết SGK
+            </button>
+            <span aria-hidden="true">·</span>
+            <button
+              onClick={handleNewSurvey}
+              className="hover:text-emerald-400 transition-colors cursor-pointer font-bold"
+            >
+              Lên đầu trang
             </button>
           </div>
-
-          <div className="samples">
-            <span className="samples__label">Hàm mẫu</span>
-            {SAMPLES.map((s) => (
-              <button
-                key={s}
-                className="samples__item"
-                onClick={() => setExpr(s)}
-              >
-                f(x) = {s}
-              </button>
-            ))}
-          </div>
-        </aside>
-
-        <main className="plot-wrap">
-          <div className="plot-wrap__title">Đồ thị f(x) = {expr}</div>
-          <div id="plot" ref={plotRef} />
-        </main>
-      </div>
-
-      <section className="results">
-        <h2>Kết quả phân tích 3 hàm mẫu trên [{xMin}, {xMax}]</h2>
-        <div className="results__grid">
-          {analyses.map((a) => (
-            <div className="result-card" key={a.expr}>
-              <div className="result-card__fn">f(x) = {a.expr}</div>
-              <div className="result-card__row">
-                <span>Nghiệm (f=0)</span>
-                <span>
-                  {a.roots.length
-                    ? a.roots.map((r) => fmt(r.approx)).join(", ")
-                    : "không có"}
-                </span>
-              </div>
-              <div className="result-card__row">
-                <span>Tiên kỷ (pole)</span>
-                <span>
-                  {a.poles.length ? a.poles.map(fmt).join(", ") : "không có"}
-                </span>
-              </div>
-              <div className="result-card__row">
-                <span>Cực trị</span>
-                <span>
-                  {a.extrema.length
-                    ? a.extrema
-                        .map((e) => `${e.kind === "max" ? "max" : "min"}@${fmt(e.x)}=${fmt(e.y)}`)
-                        .join(", ")
-                    : "không có"}
-                </span>
-              </div>
-              <div className="result-card__row">
-                <span>f(−2…3)</span>
-                <span>
-                  {a.values.map((v) => `${v.x}:${v.y === null ? "—" : fmt(v.y)}`).join("  ")}
-                </span>
-              </div>
-            </div>
-          ))}
         </div>
-        <p className="notice" style={{ marginTop: 14 }}>
-          Nghiệm và cực trị tìm theo phương pháp chia đôi / quét mẫu numerically; tiệm cận
-          dọc phát hiện qua dấu nhảy lớn. Giá trị chỉ xấp xỉ, đúng trong khoảng hiển thị.
-        </p>
-      </section>
+      </footer>
+
+      {/* Theory Reference Modal */}
+      <TheoryModal isOpen={isTheoryOpen} onClose={() => setIsTheoryOpen(false)} />
     </div>
   );
 }
