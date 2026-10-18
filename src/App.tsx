@@ -191,7 +191,7 @@ export default function App() {
         data: [
           {
             fn: expr,
-            color: "#4a9eff",
+            color: "#2563eb",
           },
         ],
       });
